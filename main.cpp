@@ -1,64 +1,167 @@
-#include <winsock2.h>
-#include <windows.h>
 #include <iostream>
-#include "SocketHandler.cpp"
-#pragma comment(lib, "ws2_32.lib")
+#include <thread>
+#include <vector>
+#include <queue>
+#include <mutex>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
 
-#define SERVER_PORT 36
+#pragma comment(lib, "Ws2_32.lib")
+
+using namespace std;
+
+struct SocketEvent {
+    SOCKET socket;
+    HANDLE event;
+};
+
+queue<SocketEvent> eventQueue;
+mutex queueMutex;
+vector<thread> socketThreads;
+const int PORT = 36;
+
+// SocketHandler thread function
+DWORD WINAPI SocketHandler(LPVOID lpParam) {
+    SOCKET clientSocket = reinterpret_cast<SOCKET>(lpParam);
+    HANDLE hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+    if (hEvent == NULL) {
+        cerr << "CreateEvent failed with error: " << GetLastError() << endl;
+        closesocket(clientSocket);
+        return 1;
+    }
+
+    WSAEVENT wsaEvent = WSACreateEvent();
+    if (WSAEventSelect(clientSocket, wsaEvent, FD_READ | FD_CLOSE) == SOCKET_ERROR) {
+        cerr << "WSAEventSelect failed with error: " << WSAGetLastError() << endl;
+        closesocket(clientSocket);
+        CloseHandle(hEvent);
+        return 1;
+    }
+
+    HANDLE events[2] = { hEvent, wsaEvent };
+
+    while (true) {
+        DWORD waitResult = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+
+        if (waitResult == WAIT_OBJECT_0) {
+            // Custom event triggered
+            queueMutex.lock();
+            eventQueue.push({ clientSocket, hEvent });
+            queueMutex.unlock();
+            ResetEvent(hEvent);
+        }
+        else if (waitResult == WAIT_OBJECT_0 + 1) {
+            queueMutex.lock();
+            eventQueue.push({ clientSocket, wsaEvent });
+            queueMutex.unlock();
+        }
+    }
+
+    closesocket(clientSocket);
+    CloseHandle(hEvent);
+    WSACloseEvent(wsaEvent);
+    return 0;
+}
+
+// Manager thread function
+DWORD WINAPI Manager(LPVOID lpParam) {
+    while (true) {
+        queueMutex.lock();
+        if (!eventQueue.empty()) {
+            SocketEvent sockEvent = eventQueue.front();
+            eventQueue.pop();
+            queueMutex.unlock();
+
+            // Process the event based on the socket event
+            WSANETWORKEVENTS netEvents;
+            if (WSAEnumNetworkEvents(sockEvent.socket, sockEvent.event, &netEvents) == SOCKET_ERROR) {
+                cerr << "WSAEnumNetworkEvents failed with error: " << WSAGetLastError() << endl;
+                continue;
+            }
+
+            if (netEvents.lNetworkEvents & FD_READ) {
+                char buf[4096];
+                int bytesReceived = recv(sockEvent.socket, buf, 4096, 0);
+                if (bytesReceived > 0) {
+                    string receivedData(buf, 0, bytesReceived);
+                    cout << "Received: " << receivedData << endl;
+                }
+                else {
+                    cerr << "recv failed with error: " << WSAGetLastError() << endl;
+                }
+            }
+
+            if (netEvents.lNetworkEvents & FD_CLOSE) {
+                cout << "Client disconnected" << endl;
+                closesocket(sockEvent.socket);
+            }
+        }
+        else {
+            queueMutex.unlock();
+            this_thread::sleep_for(chrono::milliseconds(100));
+        }
+    }
+    return 0;
+}
 
 int main() {
     WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    SOCKET listening;
+    sockaddr_in hint;
 
-    SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenSock == INVALID_SOCKET) {
-        std::cerr << "Socket creation failed with error: " << WSAGetLastError() << std::endl;
+    int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        cerr << "WSAStartup failed: " << iResult << endl;
+        exit(1);
+    }
+    listening = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listening == INVALID_SOCKET) {
+        cerr << "Can't create a socket! Quitting" << endl;
         WSACleanup();
-        return 1;
+        exit(1);
     }
 
-    sockaddr_in serverAddr = { 0 };
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(SERVER_PORT);
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    hint.sin_family = AF_INET;
+    hint.sin_port = htons(PORT);
+    hint.sin_addr.S_un.S_addr = INADDR_ANY;
 
-    if (bind(listenSock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        std::cerr << "Bind failed with error: " << WSAGetLastError() << std::endl;
-        closesocket(listenSock);
-        WSACleanup();
-        return 1;
+    if (bind(listening, (sockaddr*)&hint, sizeof(hint)) == SOCKET_ERROR) {
+        cout << "Bind Failed" << endl;
+        closesocket(listening);
+        return -1;
     }
 
-    SocketHandler* handler = nullptr;
-    try {
-        handler = new SocketHandler(listenSock);
-    }
-    catch (const std::runtime_error& e) {
-        std::cerr << e.what() << std::endl;
-        closesocket(listenSock);
-        WSACleanup();
-        return 1;
+    if (listen(listening, SOMAXCONN)  == SOCKET_ERROR) {
+        cout << "Listen failed" << endl;
+        closesocket(listening);
+        return -1;
     }
 
-    handler->startListening();
+    // Create and start the Manager thread
+    HANDLE hManagerThread = CreateThread(NULL, 0, Manager, NULL, 0, NULL);
 
-    // Asenkron iþlemleri yönetmek için olay döngüsü
     while (true) {
-        DWORD bytesTransferred;
-        ULONG_PTR completionKey;
-        LPOVERLAPPED overlapped;
-        BOOL result = GetQueuedCompletionStatus(handler->getCompletionPort(), &bytesTransferred, &completionKey, &overlapped, INFINITE);
+        SOCKET clientSocket = accept(listening, nullptr, nullptr);
+        if (clientSocket == INVALID_SOCKET) {
+            cerr << "accept failed" << endl;
+            WSACleanup();
+            exit(1);
+        }
 
-        if (result) {
-            SocketHandler* handler = (SocketHandler*)completionKey;
-            handler->handleCompletion(overlapped, bytesTransferred);
-        }
-        else {
-            std::cerr << "GetQueuedCompletionStatus failed with error: " << GetLastError() << std::endl;
-        }
+        HANDLE hThread = CreateThread(NULL, 0, SocketHandler, reinterpret_cast<LPVOID>(clientSocket), 0, NULL);
+        socketThreads.push_back(thread([hThread] { 
+            WaitForSingleObject(hThread, INFINITE); 
+            CloseHandle(hThread); }));
     }
 
-    closesocket(listenSock);
+    // Wait for the Manager thread to finish (in practice, you may want to implement a graceful shutdown mechanism)
+    WaitForSingleObject(hManagerThread, INFINITE);
+    CloseHandle(hManagerThread);
+
+    closesocket(listening);
     WSACleanup();
+
     return 0;
 }
