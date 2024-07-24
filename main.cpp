@@ -20,6 +20,11 @@ queue<SocketEvent> eventQueue;
 mutex queueMutex;
 vector<thread> socketThreads;
 const int PORT = 36;
+bool managerActive = true;
+
+void NotifySocketHandler(HANDLE hEvent) {
+    SetEvent(hEvent);
+}
 
 // SocketHandler thread function
 DWORD WINAPI SocketHandler(LPVOID lpParam) {
@@ -46,16 +51,15 @@ DWORD WINAPI SocketHandler(LPVOID lpParam) {
         DWORD waitResult = WaitForMultipleObjects(2, events, FALSE, INFINITE);
 
         if (waitResult == WAIT_OBJECT_0) {
-            // Custom event triggered
-            queueMutex.lock();
-            eventQueue.push({ clientSocket, hEvent });
-            queueMutex.unlock();
+            // Custom event triggered, reset the event
             ResetEvent(hEvent);
         }
         else if (waitResult == WAIT_OBJECT_0 + 1) {
+            // WSAEvent triggered, push to queue
             queueMutex.lock();
             eventQueue.push({ clientSocket, wsaEvent });
             queueMutex.unlock();
+            NotifySocketHandler(hEvent); // Notify manager
         }
     }
 
@@ -67,7 +71,7 @@ DWORD WINAPI SocketHandler(LPVOID lpParam) {
 
 // Manager thread function
 DWORD WINAPI Manager(LPVOID lpParam) {
-    while (true) {
+    while (managerActive) {
         queueMutex.lock();
         if (!eventQueue.empty()) {
             SocketEvent sockEvent = eventQueue.front();
@@ -97,6 +101,8 @@ DWORD WINAPI Manager(LPVOID lpParam) {
                 cout << "Client disconnected" << endl;
                 closesocket(sockEvent.socket);
             }
+
+            NotifySocketHandler(sockEvent.event); // Notify socket handler about the processed event
         }
         else {
             queueMutex.unlock();
@@ -133,7 +139,7 @@ int main() {
         return -1;
     }
 
-    if (listen(listening, SOMAXCONN)  == SOCKET_ERROR) {
+    if (listen(listening, SOMAXCONN) == SOCKET_ERROR) {
         cout << "Listen failed" << endl;
         closesocket(listening);
         return -1;
@@ -151,9 +157,10 @@ int main() {
         }
 
         HANDLE hThread = CreateThread(NULL, 0, SocketHandler, reinterpret_cast<LPVOID>(clientSocket), 0, NULL);
-        socketThreads.push_back(thread([hThread] { 
-            WaitForSingleObject(hThread, INFINITE); 
-            CloseHandle(hThread); }));
+        socketThreads.push_back(thread([hThread] {
+            WaitForSingleObject(hThread, INFINITE);
+            CloseHandle(hThread);
+            }));
     }
 
     // Wait for the Manager thread to finish (in practice, you may want to implement a graceful shutdown mechanism)
