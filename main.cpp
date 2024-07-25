@@ -1,3 +1,6 @@
+//Gelen baðlantý isteklerini main thread içerisinde SocketHandler ve Manager threadlerini yaratýp onlara yönlendirmek istiyorum, program çalýþmaya devam etsin kapanmasýn. 
+//Bu threadleri çalýþtýrma ve Wait iþlemlerini yapabilir misin?
+
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -8,6 +11,7 @@
 #include <windows.h>
 
 #pragma comment(lib, "Ws2_32.lib")
+#define IP "192.168.254.16"
 
 using namespace std;
 
@@ -17,48 +21,42 @@ using namespace std;
 //};
 
 queue<HANDLE> eventQueue;
-mutex queueMutex;
+vector<SOCKET> clients;
+mutex queueMutex,vectorMutex;
 vector<thread> socketThreads;
 const int PORT = 36;
 bool managerActive = true;
 
 DWORD WINAPI SocketHandler(LPVOID lpParam) {
-    SOCKET clientSocket = reinterpret_cast<SOCKET>(lpParam);
-    HANDLE hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-
-    if (hEvent == NULL) {
-        cerr << "CreateEvent failed with error: " << GetLastError() << endl;
-        closesocket(clientSocket);
-        return 1;
-    }
-
+    SOCKET serverSocket = reinterpret_cast<SOCKET>(lpParam);
     WSAEVENT wsaEvent = WSACreateEvent();
-    if (WSAEventSelect(clientSocket, wsaEvent, FD_READ | FD_CLOSE) == SOCKET_ERROR) {
+    if (WSAEventSelect(serverSocket, wsaEvent, FD_ACCEPT | FD_CLOSE) == SOCKET_ERROR) {
         cerr << "WSAEventSelect failed with error: " << WSAGetLastError() << endl;
-        closesocket(clientSocket);
-        CloseHandle(hEvent);
+        closesocket(serverSocket);
+        //CloseHandle(hEvent);
         return 1;
     }
 
-    HANDLE events[2] = { hEvent, wsaEvent };
+    cout << "Waiting for connection" << endl;
+    HANDLE events[1] = { wsaEvent };
 
     while (true) {
-        DWORD waitResult = WaitForMultipleObjectsEx(2, events, FALSE, INFINITE,TRUE);
-
-        if (waitResult == WAIT_OBJECT_0) {
-            ResetEvent(hEvent);
+        //Wait for event to occur.
+        DWORD waitResult = WSAWaitForMultipleEvents(1, events, FALSE, INFINITE,TRUE);
+        if (waitResult == WSA_WAIT_FAILED) {
+            cerr << "WSAWaitForMultipleEvents Failed: " << WSAGetLastError() << endl;
+            break;
         }
-        else if (waitResult == WAIT_OBJECT_0 + 1) {
-            // WSAEvent triggered, push to queue
+        if (waitResult == WAIT_OBJECT_0) {
             queueMutex.lock();
-            eventQueue.push( wsaEvent);
+            eventQueue.push(wsaEvent);
+            SetEvent(wsaEvent);
             queueMutex.unlock();
-            SetEvent(hEvent); // Notify manager
         }
     }
 
-    closesocket(clientSocket);
-    CloseHandle(hEvent);
+    closesocket(serverSocket);
+    //CloseHandle(hEvent);
     WSACloseEvent(wsaEvent);
     return 0;
 }
@@ -81,15 +79,15 @@ DWORD WINAPI Manager(LPVOID lpParam) {
                 continue;
             }
 
-            if (netEvents.lNetworkEvents & FD_READ) {
-                char buf[4096];
-                int bytesReceived = recv(serverSocket, buf, 4096, 0);
-                if (bytesReceived > 0) {
-                    string receivedData(buf, 0, bytesReceived);
-                    cout << "Received: " << receivedData << endl;
+            if (netEvents.lNetworkEvents & FD_ACCEPT) {
+                SOCKET client = accept(serverSocket, nullptr, nullptr);
+                if (client == INVALID_SOCKET) {
+                    cerr << "Accept Failed: " << WSAGetLastError() << endl;
+                    continue;
                 }
                 else {
-                    cerr << "recv failed with error: " << WSAGetLastError() << endl;
+                    clients.push_back(client);
+                    cout << "Client "<< clients.size() - 1<< " accepted" << endl;
                 }
             }
 
@@ -108,59 +106,50 @@ DWORD WINAPI Manager(LPVOID lpParam) {
 
 int main() {
     WSADATA wsaData;
-    SOCKET listening;
-    sockaddr_in hint;
+    SOCKET serverSocket;
+    sockaddr_in serv_addr;
 
-    int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (iResult != 0) {
-        cerr << "WSAStartup failed: " << iResult << endl;
+    int wsa = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (wsa != 0) {
+        cerr << "WSAStartup failed: " << wsa << endl;
         exit(1);
     }
-    listening = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listening == INVALID_SOCKET) {
+    serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (serverSocket == INVALID_SOCKET) {
         cerr << "Can't create a socket! Quitting" << endl;
         WSACleanup();
         exit(1);
     }
 
-    hint.sin_family = AF_INET;
-    hint.sin_port = htons(PORT);
-    hint.sin_addr.S_un.S_addr = INADDR_ANY;
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+    
+    if (inet_pton(AF_INET,IP,&serv_addr.sin_addr) <= 0) {
+        cout << "Invalid IP" << endl;
+        return -1;
+    }
 
-    if (bind(listening, (sockaddr*)&hint, sizeof(hint)) == SOCKET_ERROR) {
+    if (bind(serverSocket, (sockaddr*)&serv_addr, sizeof(serv_addr)) == SOCKET_ERROR) {
         cout << "Bind Failed" << endl;
-        closesocket(listening);
+        closesocket(serverSocket);
         return -1;
     }
 
-    if (listen(listening, SOMAXCONN) == SOCKET_ERROR) {
+    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
         cout << "Listen failed" << endl;
-        closesocket(listening);
+        closesocket(serverSocket);
         return -1;
     }
+    HANDLE hSocketHandlerThread = CreateThread(NULL, 0, SocketHandler, reinterpret_cast<LPVOID>(serverSocket), 0, NULL);
+    HANDLE hManagerThread = CreateThread(NULL, 0, Manager, reinterpret_cast<LPVOID>(serverSocket), 0, NULL);
 
-    HANDLE hManagerThread = CreateThread(NULL, 0, Manager, &listening, 0, NULL);
-
-    while (true) {
-        SOCKET clientSocket = accept(listening, nullptr, nullptr);
-        if (clientSocket == INVALID_SOCKET) {
-            cerr << "accept failed" << endl;
-            WSACleanup();
-            exit(1);
-        }
-
-        HANDLE hThread = CreateThread(NULL, 0, SocketHandler, reinterpret_cast<LPVOID>(clientSocket), 0, NULL);
-        socketThreads.push_back(thread([hThread] {
-            WaitForSingleObject(hThread, INFINITE);
-            CloseHandle(hThread);
-            }));
-    }
-
-    // Wait for the Manager thread to finish (in practice, you may want to implement a graceful shutdown mechanism)
+    WaitForSingleObject(hSocketHandlerThread, INFINITE);
     WaitForSingleObject(hManagerThread, INFINITE);
+
+    CloseHandle(hSocketHandlerThread);
     CloseHandle(hManagerThread);
 
-    closesocket(listening);
+    closesocket(serverSocket);
     WSACleanup();
 
     return 0;
