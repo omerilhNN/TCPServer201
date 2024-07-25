@@ -11,22 +11,17 @@
 
 using namespace std;
 
-struct SocketEvent {
-    SOCKET socket;
-    HANDLE event;
-};
+//struct SocketEvent {
+//    SOCKET socket;
+//    HANDLE event;
+//};
 
-queue<SocketEvent> eventQueue;
+queue<HANDLE> eventQueue;
 mutex queueMutex;
 vector<thread> socketThreads;
 const int PORT = 36;
 bool managerActive = true;
 
-void NotifySocketHandler(HANDLE hEvent) {
-    SetEvent(hEvent);
-}
-
-// SocketHandler thread function
 DWORD WINAPI SocketHandler(LPVOID lpParam) {
     SOCKET clientSocket = reinterpret_cast<SOCKET>(lpParam);
     HANDLE hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -48,18 +43,17 @@ DWORD WINAPI SocketHandler(LPVOID lpParam) {
     HANDLE events[2] = { hEvent, wsaEvent };
 
     while (true) {
-        DWORD waitResult = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+        DWORD waitResult = WaitForMultipleObjectsEx(2, events, FALSE, INFINITE,TRUE);
 
         if (waitResult == WAIT_OBJECT_0) {
-            // Custom event triggered, reset the event
             ResetEvent(hEvent);
         }
         else if (waitResult == WAIT_OBJECT_0 + 1) {
             // WSAEvent triggered, push to queue
             queueMutex.lock();
-            eventQueue.push({ clientSocket, wsaEvent });
+            eventQueue.push( wsaEvent);
             queueMutex.unlock();
-            NotifySocketHandler(hEvent); // Notify manager
+            SetEvent(hEvent); // Notify manager
         }
     }
 
@@ -71,23 +65,25 @@ DWORD WINAPI SocketHandler(LPVOID lpParam) {
 
 // Manager thread function
 DWORD WINAPI Manager(LPVOID lpParam) {
+    SOCKET serverSocket = reinterpret_cast<SOCKET>(lpParam);
+
     while (managerActive) {
         queueMutex.lock();
         if (!eventQueue.empty()) {
-            SocketEvent sockEvent = eventQueue.front();
+            HANDLE sockEvent = eventQueue.front();
             eventQueue.pop();
             queueMutex.unlock();
 
             // Process the event based on the socket event
             WSANETWORKEVENTS netEvents;
-            if (WSAEnumNetworkEvents(sockEvent.socket, sockEvent.event, &netEvents) == SOCKET_ERROR) {
+            if (WSAEnumNetworkEvents(serverSocket, sockEvent, &netEvents) == SOCKET_ERROR) {
                 cerr << "WSAEnumNetworkEvents failed with error: " << WSAGetLastError() << endl;
                 continue;
             }
 
             if (netEvents.lNetworkEvents & FD_READ) {
                 char buf[4096];
-                int bytesReceived = recv(sockEvent.socket, buf, 4096, 0);
+                int bytesReceived = recv(serverSocket, buf, 4096, 0);
                 if (bytesReceived > 0) {
                     string receivedData(buf, 0, bytesReceived);
                     cout << "Received: " << receivedData << endl;
@@ -99,10 +95,8 @@ DWORD WINAPI Manager(LPVOID lpParam) {
 
             if (netEvents.lNetworkEvents & FD_CLOSE) {
                 cout << "Client disconnected" << endl;
-                closesocket(sockEvent.socket);
+                closesocket(serverSocket);
             }
-
-            NotifySocketHandler(sockEvent.event); // Notify socket handler about the processed event
         }
         else {
             queueMutex.unlock();
@@ -145,8 +139,7 @@ int main() {
         return -1;
     }
 
-    // Create and start the Manager thread
-    HANDLE hManagerThread = CreateThread(NULL, 0, Manager, NULL, 0, NULL);
+    HANDLE hManagerThread = CreateThread(NULL, 0, Manager, &listening, 0, NULL);
 
     while (true) {
         SOCKET clientSocket = accept(listening, nullptr, nullptr);
