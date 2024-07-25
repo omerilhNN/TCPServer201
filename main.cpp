@@ -1,6 +1,3 @@
-//Gelen baðlantý isteklerini main thread içerisinde SocketHandler ve Manager threadlerini yaratýp onlara yönlendirmek istiyorum, program çalýþmaya devam etsin kapanmasýn. 
-//Bu threadleri çalýþtýrma ve Wait iþlemlerini yapabilir misin?
-
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -15,25 +12,20 @@
 
 using namespace std;
 
-//struct SocketEvent {
-//    SOCKET socket;
-//    HANDLE event;
-//};
-
 queue<HANDLE> eventQueue;
 vector<SOCKET> clients;
-mutex queueMutex,vectorMutex;
+mutex queueMutex, vectorMutex;
 vector<thread> socketThreads;
 const int PORT = 36;
 bool managerActive = true;
 
+// SocketHandler thread function
 DWORD WINAPI SocketHandler(LPVOID lpParam) {
     SOCKET serverSocket = *reinterpret_cast<SOCKET*>(lpParam);
     WSAEVENT wsaEvent = WSACreateEvent();
     if (WSAEventSelect(serverSocket, wsaEvent, FD_ACCEPT | FD_CLOSE) == SOCKET_ERROR) {
         cerr << "WSAEventSelect failed with error: " << WSAGetLastError() << endl;
         closesocket(serverSocket);
-        //CloseHandle(hEvent);
         return 1;
     }
 
@@ -41,23 +33,21 @@ DWORD WINAPI SocketHandler(LPVOID lpParam) {
     HANDLE events[1] = { wsaEvent };
 
     while (true) {
-        //Wait for event to occur.
-        DWORD waitResult = WSAWaitForMultipleEvents(1, events, FALSE, INFINITE,TRUE);
+        // Wait for event to occur.
+        DWORD waitResult = WSAWaitForMultipleEvents(1, events, FALSE, INFINITE, TRUE);
         if (waitResult == WSA_WAIT_FAILED) {
             cerr << "WSAWaitForMultipleEvents Failed: " << WSAGetLastError() << endl;
             break;
         }
         if (waitResult == WAIT_OBJECT_0) {
             queueMutex.lock();
-            SetEvent(wsaEvent);
             eventQueue.push(wsaEvent);
+            SetEvent(wsaEvent);
             queueMutex.unlock();
-            break;
         }
     }
 
     closesocket(serverSocket);
-    //CloseHandle(hEvent);
     WSACloseEvent(wsaEvent);
     return 0;
 }
@@ -88,8 +78,10 @@ DWORD WINAPI Manager(LPVOID lpParam) {
                     continue;
                 }
                 else {
+                    vectorMutex.lock();
                     clients.push_back(client);
-                    cout << "Client "<< clients.size() - 1<< " accepted" << endl;
+                    vectorMutex.unlock();
+                    cout << "Client " << clients.size() - 1 << " accepted" << endl;
                 }
             }
 
@@ -110,7 +102,6 @@ int main() {
     WSADATA wsaData;
     SOCKET serverSocket;
     sockaddr_in serv_addr;
-    HANDLE threadArray[2];
 
     int wsa = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (wsa != 0) {
@@ -126,8 +117,8 @@ int main() {
 
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
-    
-    if (inet_pton(AF_INET,IP,&serv_addr.sin_addr) <= 0) {
+
+    if (inet_pton(AF_INET, IP, &serv_addr.sin_addr) <= 0) {
         cout << "Invalid IP" << endl;
         return -1;
     }
@@ -138,7 +129,7 @@ int main() {
         return -1;
     }
 
-    if (listen(serverSocket, 2) == SOCKET_ERROR) {
+    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
         cout << "Listen failed" << endl;
         closesocket(serverSocket);
         return -1;
