@@ -19,7 +19,6 @@ vector<thread> socketThreads;
 const int PORT = 36;
 bool managerActive = true;
 
-// SocketHandler thread function
 DWORD WINAPI SocketHandler(LPVOID lpParam) {
     SOCKET serverSocket = *reinterpret_cast<SOCKET*>(lpParam);
     WSAEVENT wsaEvent = WSACreateEvent();
@@ -52,7 +51,6 @@ DWORD WINAPI SocketHandler(LPVOID lpParam) {
     return 0;
 }
 
-// Manager thread function
 DWORD WINAPI Manager(LPVOID lpParam) {
     SOCKET serverSocket = *reinterpret_cast<SOCKET*>(lpParam);
 
@@ -63,7 +61,6 @@ DWORD WINAPI Manager(LPVOID lpParam) {
             eventQueue.pop();
             queueMutex.unlock();
 
-            // Process the event based on the socket event
             WSANETWORKEVENTS netEvents;
             if (WSAEnumNetworkEvents(serverSocket, sockEvent, &netEvents) == SOCKET_ERROR) {
                 cerr << "WSAEnumNetworkEvents failed with error: " << WSAGetLastError() << endl;
