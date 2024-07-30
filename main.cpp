@@ -19,6 +19,61 @@ vector<thread> socketThreads;
 const int PORT = 36;
 bool managerActive = true;
 
+DWORD WINAPI SocketHandler(LPVOID lpParam);
+DWORD WINAPI Manager(LPVOID lpParam);
+
+int main() {
+    WSADATA wsaData;
+    SOCKET serverSocket;
+    sockaddr_in serv_addr;
+
+    int wsa = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (wsa != 0) {
+        cerr << "WSAStartup failed: " << wsa << endl;
+        exit(1);
+    }
+    serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (serverSocket == INVALID_SOCKET) {
+        cerr << "Can't create a socket! Quitting" << endl;
+        WSACleanup();
+        exit(1);
+    }
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+
+    if (inet_pton(AF_INET, IP, &serv_addr.sin_addr) <= 0) {
+        cout << "Invalid IP" << endl;
+        return -1;
+    }
+
+    if (bind(serverSocket, (sockaddr*)&serv_addr, sizeof(serv_addr)) == SOCKET_ERROR) {
+        cout << "Bind Failed" << endl;
+        closesocket(serverSocket);
+        return -1;
+    }
+
+    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
+        cout << "Listen failed" << endl;
+        closesocket(serverSocket);
+        return -1;
+    }
+
+    HANDLE hSocketHandlerThread = CreateThread(NULL, 0, SocketHandler, reinterpret_cast<LPVOID>(&serverSocket), 0, NULL);
+    HANDLE hManagerThread = CreateThread(NULL, 0, Manager, reinterpret_cast<LPVOID>(&serverSocket), 0, NULL);
+
+    WaitForSingleObject(hSocketHandlerThread, INFINITE);
+    WaitForSingleObject(hManagerThread, INFINITE);
+
+    CloseHandle(hSocketHandlerThread);
+    CloseHandle(hManagerThread);
+
+    closesocket(serverSocket);
+    WSACleanup();
+
+    return 0;
+}
+
 DWORD WINAPI SocketHandler(LPVOID lpParam) {
     SOCKET serverSocket = *reinterpret_cast<SOCKET*>(lpParam);
     WSAEVENT wsaEvent = WSACreateEvent();
@@ -92,57 +147,5 @@ DWORD WINAPI Manager(LPVOID lpParam) {
             this_thread::sleep_for(chrono::milliseconds(100));
         }
     }
-    return 0;
-}
-
-int main() {
-    WSADATA wsaData;
-    SOCKET serverSocket;
-    sockaddr_in serv_addr;
-
-    int wsa = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (wsa != 0) {
-        cerr << "WSAStartup failed: " << wsa << endl;
-        exit(1);
-    }
-    serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (serverSocket == INVALID_SOCKET) {
-        cerr << "Can't create a socket! Quitting" << endl;
-        WSACleanup();
-        exit(1);
-    }
-
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(PORT);
-
-    if (inet_pton(AF_INET, IP, &serv_addr.sin_addr) <= 0) {
-        cout << "Invalid IP" << endl;
-        return -1;
-    }
-
-    if (bind(serverSocket, (sockaddr*)&serv_addr, sizeof(serv_addr)) == SOCKET_ERROR) {
-        cout << "Bind Failed" << endl;
-        closesocket(serverSocket);
-        return -1;
-    }
-
-    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
-        cout << "Listen failed" << endl;
-        closesocket(serverSocket);
-        return -1;
-    }
-
-    HANDLE hSocketHandlerThread = CreateThread(NULL, 0, SocketHandler, reinterpret_cast<LPVOID>(&serverSocket), 0, NULL);
-    HANDLE hManagerThread = CreateThread(NULL, 0, Manager, reinterpret_cast<LPVOID>(&serverSocket), 0, NULL);
-
-    WaitForSingleObject(hSocketHandlerThread, INFINITE);
-    WaitForSingleObject(hManagerThread, INFINITE);
-
-    CloseHandle(hSocketHandlerThread);
-    CloseHandle(hManagerThread);
-
-    closesocket(serverSocket);
-    WSACleanup();
-
     return 0;
 }
